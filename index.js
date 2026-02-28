@@ -1732,10 +1732,14 @@ client.on('messageCreate', async (message) => {
         let connection = getVoiceConnection(message.guild.id);
         
         // --- AGGRESSIVE CONNECTION RESET ---
-        // If we have a connection object but it is NOT Ready, it might be stuck.
+        // If we have a connection object but it is NOT Ready, and NOT connecting, it might be stuck.
         // We destroy it to force a fresh join.
-        if (connection && connection.state.status !== VoiceConnectionStatus.Ready) {
-            console.log(`[TTS DEBUG] Connection exists but state is "${connection.state.status}" (Not Ready). Destroying to force fresh join...`);
+        // BUT we must NOT destroy if it is currently 'Signalling' or 'Connecting' or we kill valid attempts!
+        if (connection && 
+            connection.state.status !== VoiceConnectionStatus.Ready && 
+            connection.state.status !== VoiceConnectionStatus.Signalling && 
+            connection.state.status !== VoiceConnectionStatus.Connecting) {
+            console.log(`[TTS DEBUG] Connection exists but state is "${connection.state.status}" (Stuck). Destroying to force fresh join...`);
             try { connection.destroy(); } catch (e) {}
             connection = null;
         }
@@ -1801,6 +1805,7 @@ client.on('messageCreate', async (message) => {
                      console.error("[TTS DEBUG] Connection failed to reach Ready within 20s. Forcing rejoin...");
                      // If we timed out, destroy and try once more
                      try { connection.destroy(); } catch(e) {}
+                     await delay(1000); // Wait for cleanup
                      
                      const member = message.member;
                      if (!member || !member.voice.channel) return;
@@ -1821,8 +1826,9 @@ client.on('messageCreate', async (message) => {
                         await entersState(connection, VoiceConnectionStatus.Ready, 20_000);
                         console.log(`[TTS DEBUG] Connection Ready after retry.`);
                      } catch (retryErr) {
-                        console.error("[TTS DEBUG] Retry connection timed out. Attempting to play anyway (Soft Fail).");
-                        // We do NOT return here. We let the code proceed to play()
+                        console.error("[TTS DEBUG] Retry connection timed out. Aborting playback (Connection not ready).");
+                        message.reply("❌ Voice connection timed out. Please try again.").catch(() => {});
+                        return;
                      }
                  }
             } else {
