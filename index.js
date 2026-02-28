@@ -587,6 +587,9 @@ const commands = [
         .setName('queue')
         .setDescription('Show current music queue'),
     new SlashCommandBuilder()
+        .setName('leave')
+        .setDescription('Force the bot to leave the voice channel (Reset Connection)'),
+    new SlashCommandBuilder()
         .setName('tts')
         .setDescription('Toggle Text-to-Speech for this channel (Bot reads messages)'),
     new SlashCommandBuilder()
@@ -1397,6 +1400,16 @@ client.on('interactionCreate', async interaction => {
         await interaction.reply({ embeds: [embed] });
     }
 
+    if (interaction.commandName === 'leave') {
+        const connection = getVoiceConnection(interaction.guild.id);
+        if (connection) {
+            connection.destroy();
+            await interaction.reply('Disconnected from voice channel. (Connection Reset)');
+        } else {
+            await interaction.reply('I am not in a voice channel!');
+        }
+    }
+
     // --- TTS COMMAND ---
     if (interaction.commandName === 'tts') {
         const currentChannelId = ttsChannels.get(interaction.guild.id);
@@ -1717,6 +1730,15 @@ client.on('messageCreate', async (message) => {
 
         // Check if bot is in voice
         let connection = getVoiceConnection(message.guild.id);
+        
+        // --- AGGRESSIVE CONNECTION RESET ---
+        // If we have a connection object but it is NOT Ready, it might be stuck.
+        // We destroy it to force a fresh join.
+        if (connection && connection.state.status !== VoiceConnectionStatus.Ready) {
+            console.log(`[TTS DEBUG] Connection exists but state is "${connection.state.status}" (Not Ready). Destroying to force fresh join...`);
+            try { connection.destroy(); } catch (e) {}
+            connection = null;
+        }
         
         // If not connected, try to join the user's voice channel
         if (!connection) {
