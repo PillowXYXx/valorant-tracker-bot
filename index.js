@@ -73,6 +73,7 @@ if (fs.existsSync(ffmpegPath)) {
     try {
         await sodium.ready;
         console.log('[STARTUP] Libsodium is ready!');
+        console.log('[STARTUP] VERSION: VOICE DEBUG ENABLED + RETRY LOGIC (v4)');
     } catch (e) {
         console.error('[STARTUP] Libsodium failed to initialize:', e);
     }
@@ -598,6 +599,17 @@ const rest = new REST({ version: '10' }).setToken(process.env.DISCORD_TOKEN);
 
 client.once('ready', async () => {
     console.log(`Logged in as ${client.user.tag}!`);
+    console.log(`[STARTUP] VERSION: VOICE DEBUG ENABLED + RETRY LOGIC (v4)`);
+    console.log(`[STARTUP] Cleaning up any stale voice connections...`);
+    // Cleanup stale connections
+    client.guilds.cache.forEach(guild => {
+        const connection = getVoiceConnection(guild.id);
+        if (connection) {
+            console.log(`[STARTUP] Destroying stale connection in guild: ${guild.id}`);
+            connection.destroy();
+        }
+    });
+
     console.log(generateDependencyReport()); // Check voice dependencies
     console.log(`[INFO] Bot Dashboard: https://discord.com/developers/applications/${client.user.id}/information`);
 
@@ -1695,6 +1707,13 @@ client.on('messageCreate', async (message) => {
     const ttsChannelId = ttsChannels.get(message.guild.id);
     if (ttsChannelId === message.channel.id) {
         console.log(`[TTS DEBUG] Processing message: "${message.content}"`);
+        
+        // Notify user we are trying
+        // But only if we are NOT already connected/ready to avoid spam
+        const currentConnection = getVoiceConnection(message.guild.id);
+        if (!currentConnection || currentConnection.state.status !== VoiceConnectionStatus.Ready) {
+             message.reply({ content: "🔊 Trying to join voice... (Debug Mode: ON)", allowedMentions: { repliedUser: false } }).catch(() => {});
+        }
 
         // Check if bot is in voice
         let connection = getVoiceConnection(message.guild.id);
