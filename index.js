@@ -42,6 +42,7 @@ const path = require('path');
 const Groq = require('groq-sdk');
 const ffmpegPath = require('ffmpeg-static');
 const opus = require('opusscript'); // Explicitly import opusscript
+const sodium = require('libsodium-wrappers'); // Explicitly import libsodium
 
 // --- FIX FOR RENDER/LINUX DEPLOYMENT ---
 // Explicitly set the FFmpeg path for discord.js / prism-media
@@ -49,6 +50,11 @@ const opus = require('opusscript'); // Explicitly import opusscript
 process.env.FFMPEG_PATH = ffmpegPath; 
 
 console.log(`[STARTUP] FFmpeg Path: ${ffmpegPath}`);
+(async () => {
+    await sodium.ready;
+    console.log('[STARTUP] Libsodium is ready!');
+})();
+
 console.log(`[STARTUP] Voice Dependencies Report:\n${generateDependencyReport()}`);
 
 const USERS_FILE = path.join(__dirname, 'users.json');
@@ -559,6 +565,9 @@ const commands = [
     new SlashCommandBuilder()
         .setName('tts')
         .setDescription('Toggle Text-to-Speech for this channel (Bot reads messages)'),
+    new SlashCommandBuilder()
+        .setName('diagnose')
+        .setDescription('Check voice system health and dependencies'),
 ]
     .map(command => command.toJSON());
 
@@ -1384,6 +1393,34 @@ client.on('interactionCreate', async interaction => {
         }
     }
 
+    // --- DIAGNOSE COMMAND ---
+    if (interaction.commandName === 'diagnose') {
+        await interaction.deferReply({ ephemeral: false });
+        const report = generateDependencyReport();
+        
+        const ffmpegStatus = process.env.FFMPEG_PATH ? `✅ Set to: ${process.env.FFMPEG_PATH}` : '❌ Not Set (using default)';
+        
+        let sodiumStatus = '❌ Not Ready';
+        try {
+            await sodium.ready;
+            sodiumStatus = '✅ Ready';
+        } catch (e) {
+            sodiumStatus = `❌ Error: ${e.message}`;
+        }
+
+        const embed = new EmbedBuilder()
+            .setTitle('Voice System Diagnostic')
+            .addFields(
+                { name: 'Dependency Report', value: `\`\`\`\n${report}\n\`\`\`` },
+                { name: 'FFmpeg Path', value: ffmpegStatus },
+                { name: 'Sodium Status', value: sodiumStatus },
+                { name: 'OpusScript', value: '✅ Loaded (Explicit)' }
+            )
+            .setColor('#00FF00');
+
+        return interaction.editReply({ embeds: [embed] });
+    }
+
     // --- VOICE FUN COMMANDS ---
     if (interaction.commandName === 'say') {
         const message = interaction.options.getString('message');
@@ -1427,7 +1464,6 @@ client.on('interactionCreate', async interaction => {
             console.log(`[VOICE] Generated TTS URL for: "${message}"`);
 
             const resource = createAudioResource(url, { 
-                inputType: StreamType.Arbitrary,
                 inlineVolume: true 
             });
             resource.volume.setVolume(1.0);
@@ -1663,8 +1699,8 @@ client.on('messageCreate', async (message) => {
             });
             console.log(`[TTS] Generated URL for: "${message.content.substring(0, 20)}..."`);
 
+            // Use simple resource creation for URL - let FFmpeg probe it
             const resource = createAudioResource(url, { 
-                inputType: StreamType.Arbitrary, 
                 inlineVolume: true 
             });
             resource.volume.setVolume(1.0);
