@@ -63,9 +63,19 @@ const sodium = require('libsodium-wrappers'); // Explicitly import libsodium
 process.env.FFMPEG_PATH = ffmpegPath; 
 
 console.log(`[STARTUP] FFmpeg Path: ${ffmpegPath}`);
+if (fs.existsSync(ffmpegPath)) {
+    console.log('[STARTUP] FFmpeg binary exists at path.');
+} else {
+    console.error('[STARTUP] CRITICAL: FFmpeg binary NOT found at path!');
+}
+
 (async () => {
-    await sodium.ready;
-    console.log('[STARTUP] Libsodium is ready!');
+    try {
+        await sodium.ready;
+        console.log('[STARTUP] Libsodium is ready!');
+    } catch (e) {
+        console.error('[STARTUP] Libsodium failed to initialize:', e);
+    }
 })();
 
 console.log(`[STARTUP] Voice Dependencies Report:\n${generateDependencyReport()}`);
@@ -1489,7 +1499,11 @@ client.on('interactionCreate', async interaction => {
             });
             resource.volume.setVolume(1.0);
 
-            const player = createAudioPlayer();
+            const player = createAudioPlayer({
+                behaviors: {
+                    noSubscriber: NoSubscriberBehavior.Play,
+                },
+            });
             
             player.on('stateChange', (oldState, newState) => {
                 console.log(`[SAY] Player State: ${oldState.status} -> ${newState.status}`);
@@ -1576,7 +1590,11 @@ client.on('interactionCreate', async interaction => {
             const resource = createAudioResource(soundUrl, { inlineVolume: true });
             resource.volume.setVolume(1.0);
             
-            const player = createAudioPlayer();
+            const player = createAudioPlayer({
+                behaviors: {
+                    noSubscriber: NoSubscriberBehavior.Play,
+                },
+            });
 
             player.on('error', error => {
                 console.error(`[VOICE] Player Error: ${error.message}`);
@@ -1745,14 +1763,31 @@ client.on('messageCreate', async (message) => {
             });
             console.log(`[TTS DEBUG] Stream fetched. Status: ${response.status}`);
 
+            // DEBUG: Listen for data events to ensure stream is valid
+            response.data.once('data', (chunk) => {
+                console.log(`[TTS DEBUG] Received first chunk of data (${chunk.length} bytes)`);
+            });
+            response.data.on('error', (err) => {
+                console.error(`[TTS DEBUG] Stream Error:`, err);
+            });
+
             const resource = createAudioResource(response.data, { 
                 inputType: StreamType.Arbitrary,
                 inlineVolume: true 
             });
             resource.volume.setVolume(1.0);
             
-            const ttsPlayer = createAudioPlayer();
+            const ttsPlayer = createAudioPlayer({
+                behaviors: {
+                    noSubscriber: NoSubscriberBehavior.Play,
+                },
+            });
             
+            // Player Debugging
+            ttsPlayer.on('debug', msg => {
+                console.log(`[TTS PLAYER DEBUG] ${msg}`);
+            });
+
             ttsPlayer.on('stateChange', (oldState, newState) => {
                 console.log(`[TTS DEBUG] Player State: ${oldState.status} -> ${newState.status}`);
             });
@@ -1815,6 +1850,16 @@ async function playNextSong(guildId) {
         
         console.log(`[MUSIC] Playing ${song.title} - Stream Type: ${stream.type}`);
 
+        // Debug Stream Data
+        if (stream.stream) {
+            stream.stream.once('data', (chunk) => {
+                console.log(`[MUSIC] Received first chunk of music data (${chunk.length} bytes)`);
+            });
+            stream.stream.on('error', (err) => {
+                console.error(`[MUSIC] Stream Error:`, err);
+            });
+        }
+
         // FORCE StreamType.Arbitrary to use FFmpeg transcoding
         // This fixes issues where direct Opus streams are malformed or incompatible
         // It adds CPU overhead but is much more reliable
@@ -1828,6 +1873,11 @@ async function playNextSong(guildId) {
                 inlineVolume: true 
             });
             resource.volume.setVolume(1.0);
+
+            // Player Debugging
+            queue.player.on('debug', msg => {
+                console.log(`[MUSIC PLAYER DEBUG] ${msg}`);
+            });
 
             queue.player.play(resource);
         } catch (resError) {
