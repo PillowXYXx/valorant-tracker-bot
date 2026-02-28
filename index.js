@@ -15,6 +15,15 @@ const {
     ButtonBuilder,
     ButtonStyle
 } = require('discord.js');
+const { 
+    joinVoiceChannel, 
+    createAudioPlayer, 
+    createAudioResource, 
+    AudioPlayerStatus, 
+    VoiceConnectionStatus,
+    entersState
+} = require('@discordjs/voice');
+const discordTTS = require('discord-tts');
 const axios = require('axios');
 const fs = require('fs');
 const path = require('path');
@@ -474,12 +483,34 @@ const commands = [
         .setDescription('Make the bot say something as another user (Fake Message)')
         .addUserOption(option => 
             option.setName('target')
-                .setDescription('The user to impersonate')
-                .setRequired(true))
+            .setDescription('The user to impersonate')
+            .setRequired(true))
         .addStringOption(option =>
             option.setName('message')
-                .setDescription('The message to say')
-                .setRequired(true))
+            .setDescription('The message to say')
+            .setRequired(true)),
+    new SlashCommandBuilder()
+        .setName('say')
+        .setDescription('Make the bot say something in Voice Channel (TTS)')
+        .addStringOption(option =>
+            option.setName('message')
+            .setDescription('The text to speak')
+            .setRequired(true)),
+    new SlashCommandBuilder()
+        .setName('sound')
+        .setDescription('Play a funny sound effect in Voice Channel')
+        .addStringOption(option =>
+            option.setName('effect')
+            .setDescription('Sound effect to play')
+            .setRequired(true)
+            .addChoices(
+                { name: 'Vine Boom', value: 'vine-boom' },
+                { name: 'Bruh', value: 'bruh' },
+                { name: 'Airhorn', value: 'airhorn' },
+                { name: 'Discord Join', value: 'discord-join' },
+                { name: 'Discord Leave', value: 'discord-leave' },
+                { name: 'Error', value: 'error' }
+            ))
 ]
     .map(command => command.toJSON());
 
@@ -557,7 +588,7 @@ client.on('interactionCreate', async interaction => {
         // Strict Check: Only allow 'BP' role (ID: 1476579373162303580)
         // Bypasses Admin check - even Admins need this role.
         if (!interaction.member.roles.cache.has('1476579373162303580')) {
-            return interaction.reply({ content: '❌ **Access Denied**: You need the <@&1476579373162303580> role to use this command.', ephemeral: true });
+            return interaction.reply({ content: '❌ **Access Denied**: You cannot use this command.', ephemeral: true });
         }
 
         const targetUser = interaction.options.getUser('target');
@@ -608,12 +639,15 @@ client.on('interactionCreate', async interaction => {
         if (!name || !tag) {
             const linked = userProfiles[interaction.user.id];
             if (!linked) {
+                // Return ephemeral reply if no linked account found
                 return interaction.reply({ content: '❌ Please provide a name/tag OR link your account first using `/link name tag`', ephemeral: true });
             }
             name = name || linked.name;
             tag = tag || linked.tag;
         }
 
+        // Make ephemeral
+        await interaction.deferReply({ ephemeral: true });
         await handleMatchHistory(interaction, name, tag, mode);
         return;
     }
@@ -647,18 +681,20 @@ client.on('interactionCreate', async interaction => {
         const target = interaction.options.getString('target');
         let name = interaction.options.getString('name');
         let tag = interaction.options.getString('tag');
+        
+        // Ephemeral by default
+        await interaction.deferReply({ ephemeral: true });
 
         // Check for linked account if args are missing
         if (!name || !tag) {
             const linked = userProfiles[interaction.user.id];
             if (!linked) {
-                return interaction.reply({ content: '❌ Please provide a name/tag OR link your account first using `/link name tag`', ephemeral: true });
+                // Already deferred, so editReply
+                return interaction.editReply({ content: '❌ Please provide a name/tag OR link your account first using `/link name tag`' });
             }
             name = name || linked.name;
             tag = tag || linked.tag;
         }
-
-        await interaction.deferReply();
 
         try {
             // 1. Get Account & Region
@@ -1005,6 +1041,9 @@ client.on('interactionCreate', async interaction => {
         const tag = interaction.options.getString('tag');
         const mode = interaction.options.getString('mode') || 'all';
         
+        // Ephemeral by default
+        await interaction.deferReply({ ephemeral: true });
+
         // Pass to the same logic as /val but without the link check
         await handleMatchHistory(interaction, name, tag, mode);
     }
@@ -1014,7 +1053,7 @@ client.on('interactionCreate', async interaction => {
         // Strict Check: Only allow 'BP' role (ID: 1476579373162303580)
         // Bypasses Admin check - even Admins need this role.
         if (!interaction.member.roles.cache.has('1476579373162303580')) {
-            return interaction.reply({ content: '❌ **Access Denied**: You need the <@&1476579373162303580> role to use this command.', ephemeral: true });
+            return interaction.reply({ content: '❌ **Access Denied**: You cannot use this command.', ephemeral: true });
         }
 
         const targetUser = interaction.options.getUser('target');
@@ -1058,7 +1097,7 @@ client.on('interactionCreate', async interaction => {
         
         // Strict Check: Only allow 'BP' role (ID: 1476579373162303580)
         if (!interaction.member.roles.cache.has('1476579373162303580')) {
-            return interaction.reply({ content: '❌ **Access Denied**: You need the <@&1476579373162303580> role to use this command.', ephemeral: true });
+            return interaction.reply({ content: '❌ **Access Denied**: You cannot use this command.', ephemeral: true });
         }
 
         // Check permissions
@@ -1097,11 +1136,105 @@ client.on('interactionCreate', async interaction => {
                 allowedMentions: { parse: [] } 
             });
 
-            await interaction.editReply({ content: `✅ **Sent** as ${targetUser}` });
+            await interaction.editReply({ content: `✅ **Sent** as ${targetUser}`, ephemeral: true });
 
         } catch (error) {
             console.error("Impersonate Error:", error);
-            await interaction.editReply({ content: '❌ Failed to send message. Ensure I have `Manage Webhooks` permission.' });
+            await interaction.editReply({ content: '❌ Failed to send message. Ensure I have `Manage Webhooks` permission.', ephemeral: true });
+        }
+    }
+
+    // --- VOICE FUN COMMANDS ---
+    if (interaction.commandName === 'say') {
+        const message = interaction.options.getString('message');
+        const member = interaction.member;
+        const voiceChannel = member.voice.channel;
+
+        if (!voiceChannel) {
+            return interaction.reply({ content: '❌ You need to be in a voice channel!', ephemeral: true });
+        }
+
+        await interaction.deferReply({ ephemeral: true });
+
+        try {
+            const connection = joinVoiceChannel({
+                channelId: voiceChannel.id,
+                guildId: interaction.guild.id,
+                adapterCreator: interaction.guild.voiceAdapterCreator,
+            });
+
+            await entersState(connection, VoiceConnectionStatus.Ready, 30e3);
+
+            const stream = discordTTS.getVoiceStream(message);
+            const resource = createAudioResource(stream);
+            const player = createAudioPlayer();
+
+            player.play(resource);
+            connection.subscribe(player);
+
+            player.on(AudioPlayerStatus.Idle, () => {
+                connection.destroy();
+            });
+
+            await interaction.editReply({ content: `🗣️ Said: "${message}"` });
+
+        } catch (error) {
+            console.error(error);
+            await interaction.editReply({ content: '❌ Failed to join or speak.' });
+        }
+    }
+
+    if (interaction.commandName === 'sound') {
+        const effect = interaction.options.getString('effect');
+        const member = interaction.member;
+        const voiceChannel = member.voice.channel;
+
+        if (!voiceChannel) {
+            return interaction.reply({ content: '❌ You need to be in a voice channel!', ephemeral: true });
+        }
+
+        await interaction.deferReply({ ephemeral: true });
+
+        // Map effect names to URLs or local paths (using online MP3s for simplicity/demo)
+        const sounds = {
+            'vine-boom': 'https://www.myinstants.com/media/sounds/vine-boom.mp3',
+            'bruh': 'https://www.myinstants.com/media/sounds/movie_1.mp3',
+            'airhorn': 'https://www.myinstants.com/media/sounds/airhorn.mp3',
+            'discord-join': 'https://www.myinstants.com/media/sounds/discord-join.mp3',
+            'discord-leave': 'https://www.myinstants.com/media/sounds/discord-leave.mp3',
+            'error': 'https://www.myinstants.com/media/sounds/windows-error.mp3'
+        };
+
+        const soundUrl = sounds[effect];
+
+        if (!soundUrl) {
+             return interaction.editReply({ content: '❌ Sound not found.' });
+        }
+
+        try {
+            const connection = joinVoiceChannel({
+                channelId: voiceChannel.id,
+                guildId: interaction.guild.id,
+                adapterCreator: interaction.guild.voiceAdapterCreator,
+            });
+
+            await entersState(connection, VoiceConnectionStatus.Ready, 30e3);
+
+            const resource = createAudioResource(soundUrl);
+            const player = createAudioPlayer();
+
+            player.play(resource);
+            connection.subscribe(player);
+
+            player.on(AudioPlayerStatus.Idle, () => {
+                connection.destroy();
+            });
+
+            await interaction.editReply({ content: `🔊 Playing: **${effect}**` });
+
+        } catch (error) {
+            console.error(error);
+            await interaction.editReply({ content: '❌ Failed to play sound.' });
         }
     }
 });
@@ -1277,7 +1410,8 @@ async function fetchDeepHistory(interaction, name, tag, region, initialMatches, 
 
 // Extracted logic to support both /val and /scout
 async function handleMatchHistory(interaction, name, tag, mode = 'all') {
-    if (!interaction.deferred) await interaction.deferReply();
+    // If not already deferred (it should be now), defer it
+    if (!interaction.deferred) await interaction.deferReply({ ephemeral: true });
 
     try {
         // 1. Get Account Data
