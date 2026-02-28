@@ -1463,7 +1463,14 @@ client.on('interactionCreate', async interaction => {
             });
             console.log(`[VOICE] Generated TTS URL for: "${message}"`);
 
-            const resource = createAudioResource(url, { 
+            // Use Axios to fetch the stream to bypass FFmpeg probing issues with some URLs
+            const response = await axios({
+                method: 'get',
+                url: url,
+                responseType: 'stream'
+            });
+
+            const resource = createAudioResource(response.data, { 
                 inlineVolume: true 
             });
             resource.volume.setVolume(1.0);
@@ -1647,15 +1654,24 @@ client.on('voiceStateUpdate', async (oldState, newState) => {
 client.on('messageCreate', async (message) => {
     if (message.author.bot || !message.guild || !message.content) return;
 
+    // DEBUG: Check if TTS should trigger
+    if (ttsChannels.has(message.guild.id)) {
+        console.log(`[TTS DEBUG] Message in guild ${message.guild.id}, channel ${message.channel.id}. TTS Channel is: ${ttsChannels.get(message.guild.id)}`);
+    }
+
     const ttsChannelId = ttsChannels.get(message.guild.id);
     if (ttsChannelId === message.channel.id) {
+        console.log(`[TTS DEBUG] Processing message: "${message.content}"`);
+
         // Check if bot is in voice
         let connection = getVoiceConnection(message.guild.id);
         
         // If not connected, try to join the user's voice channel
         if (!connection) {
+            console.log(`[TTS DEBUG] Bot not connected. Checking user voice state...`);
             const member = message.member;
             if (member && member.voice.channel) {
+                console.log(`[TTS DEBUG] User in voice channel: ${member.voice.channel.id}. Joining...`);
                 try {
                     connection = joinVoiceChannel({
                         channelId: member.voice.channel.id,
@@ -1664,26 +1680,32 @@ client.on('messageCreate', async (message) => {
                         selfDeaf: false,
                         selfMute: false
                     });
+                    console.log(`[TTS DEBUG] Join command sent.`);
                 } catch (e) {
-                    console.error('TTS Auto-Join Error:', e);
+                    console.error('[TTS DEBUG] Auto-Join Error:', e);
                     return;
                 }
             } else {
+                console.log(`[TTS DEBUG] User NOT in voice channel. Ignoring.`);
                 return; // User not in voice, bot not in voice
             }
+        } else {
+             console.log(`[TTS DEBUG] Bot already connected to voice.`);
         }
 
         try {
             // Ensure connection is ready before playing
             if (connection.state.status !== VoiceConnectionStatus.Ready) {
                  try {
-                     console.log(`[TTS] Connection not ready, waiting...`);
+                     console.log(`[TTS DEBUG] Connection not ready (State: ${connection.state.status}), waiting...`);
                      await entersState(connection, VoiceConnectionStatus.Ready, 5000);
-                     console.log(`[TTS] Connection ready.`);
+                     console.log(`[TTS DEBUG] Connection ready.`);
                  } catch (err) {
-                     console.error("TTS Connection Timeout:", err);
+                     console.error("[TTS DEBUG] Connection Timeout:", err);
                      return;
                  }
+            } else {
+                 console.log(`[TTS DEBUG] Connection is Ready.`);
             }
 
             // Using direct URL if getVoiceStream fails or produces silence
@@ -1697,10 +1719,18 @@ client.on('messageCreate', async (message) => {
                 slow: false,
                 host: 'https://translate.google.com',
             });
-            console.log(`[TTS] Generated URL for: "${message.content.substring(0, 20)}..."`);
+            console.log(`[TTS DEBUG] Generated URL: "${url}"`);
 
-            // Use simple resource creation for URL - let FFmpeg probe it
-            const resource = createAudioResource(url, { 
+            // Use Axios to fetch the stream to bypass FFmpeg probing issues with some URLs
+            console.log(`[TTS DEBUG] Fetching audio stream via Axios...`);
+            const response = await axios({
+                method: 'get',
+                url: url,
+                responseType: 'stream'
+            });
+            console.log(`[TTS DEBUG] Stream fetched. Status: ${response.status}`);
+
+            const resource = createAudioResource(response.data, { 
                 inlineVolume: true 
             });
             resource.volume.setVolume(1.0);
@@ -1708,29 +1738,31 @@ client.on('messageCreate', async (message) => {
             const ttsPlayer = createAudioPlayer();
             
             ttsPlayer.on('stateChange', (oldState, newState) => {
-                console.log(`[TTS] Player State: ${oldState.status} -> ${newState.status}`);
+                console.log(`[TTS DEBUG] Player State: ${oldState.status} -> ${newState.status}`);
             });
 
             ttsPlayer.on('error', error => {
-                console.error('TTS Player Error:', error);
+                console.error('[TTS DEBUG] Player Error:', error);
                 const musicQueue = musicQueues.get(message.guild.id);
                 if (musicQueue) connection.subscribe(musicQueue.player);
             });
 
             ttsPlayer.play(resource);
+            console.log(`[TTS DEBUG] Play command sent.`);
             
             // If music is playing, temporarily switch subscription
             const musicQueue = musicQueues.get(message.guild.id);
             if (musicQueue && musicQueue.isPlaying) {
                  // Pause music? Or just unsubscribe?
                  // Usually just unsubscribing is enough, the player keeps playing in background
+                 console.log(`[TTS DEBUG] Music is playing. Switching subscription.`);
             }
             
             const subscription = connection.subscribe(ttsPlayer);
             if (!subscription) {
-                console.error('[TTS] Failed to subscribe to player');
+                console.error('[TTS DEBUG] Failed to subscribe to player');
             } else {
-                console.log('[TTS] Subscribed to player');
+                console.log('[TTS DEBUG] Subscribed to player successfully');
             }
             
             if (subscription) {
@@ -1767,21 +1799,12 @@ async function playNextSong(guildId) {
         
         console.log(`[MUSIC] Playing ${song.title} - Stream Type: ${stream.type}`);
 
-        // Handle specific stream types for play-dl
-        let inputType = StreamType.Arbitrary;
+        // FORCE StreamType.Arbitrary to use FFmpeg transcoding
+        // This fixes issues where direct Opus streams are malformed or incompatible
+        // It adds CPU overhead but is much more reliable
+        let inputType = StreamType.Arbitrary; 
         
-        // play-dl stream types can be 'webm/opus', 'ogg/opus', or others
-        // StreamType.WebmOpus requires the input to be exactly WebM/Opus
-        // StreamType.OggOpus requires Ogg/Opus
-        // StreamType.Arbitrary lets Discord.js handle ffmpeg transcoding if needed
-        
-        if (stream.type === 'webm/opus') {
-            inputType = StreamType.WebmOpus;
-        } else if (stream.type === 'ogg/opus') {
-            inputType = StreamType.OggOpus;
-        }
-        
-        console.log(`[MUSIC] Using InputType: ${inputType}`);
+        console.log(`[MUSIC] Using InputType: ${inputType} (Forced FFmpeg)`);
 
         const resource = createAudioResource(stream.stream, {
             inputType: inputType,
