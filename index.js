@@ -21,9 +21,13 @@ const {
     createAudioResource, 
     AudioPlayerStatus, 
     VoiceConnectionStatus,
-    entersState
+    entersState,
+    generateDependencyReport,
+    getVoiceConnection,
+    NoSubscriberBehavior
 } = require('@discordjs/voice');
 const discordTTS = require('discord-tts');
+const play = require('play-dl');
 const axios = require('axios');
 const fs = require('fs');
 const path = require('path');
@@ -74,6 +78,9 @@ let trollUsers = new Set(); // Stores user IDs to auto-roast
 let autoKickUsers = new Set(); // Stores user IDs to auto-kick from voice
 const TROLL_TARGET_NAME = 'jeff';
 const TROLL_IMAGE_DIR = path.join(__dirname, 'Photo');
+
+// Music Queue System
+const musicQueues = new Map(); // Guild ID -> { queue: [], player: AudioPlayer, connection: VoiceConnection, isPlaying: boolean }
 
 // Troll Modes
 const TROLL_MODES = {
@@ -510,7 +517,23 @@ const commands = [
                 { name: 'Discord Join', value: 'discord-join' },
                 { name: 'Discord Leave', value: 'discord-leave' },
                 { name: 'Error', value: 'error' }
-            ))
+            )),
+    new SlashCommandBuilder()
+        .setName('play')
+        .setDescription('Play a song from YouTube')
+        .addStringOption(option =>
+            option.setName('query')
+            .setDescription('YouTube URL or Song Name')
+            .setRequired(true)),
+    new SlashCommandBuilder()
+        .setName('skip')
+        .setDescription('Skip the current song'),
+    new SlashCommandBuilder()
+        .setName('stop')
+        .setDescription('Stop music and clear queue'),
+    new SlashCommandBuilder()
+        .setName('queue')
+        .setDescription('Show current music queue')
 ]
     .map(command => command.toJSON());
 
@@ -518,6 +541,7 @@ const rest = new REST({ version: '10' }).setToken(process.env.DISCORD_TOKEN);
 
 client.once('ready', async () => {
     console.log(`Logged in as ${client.user.tag}!`);
+    console.log(generateDependencyReport()); // Check voice dependencies
     console.log(`[INFO] Bot Dashboard: https://discord.com/developers/applications/${client.user.id}/information`);
 
     try {
@@ -1144,6 +1168,144 @@ client.on('interactionCreate', async interaction => {
         }
     }
 
+    // --- MUSIC COMMANDS ---
+    if (interaction.commandName === 'play') {
+        const query = interaction.options.getString('query');
+        const member = interaction.member;
+        const voiceChannel = member.voice.channel;
+
+        if (!voiceChannel) {
+            return interaction.reply({ content: '❌ You need to be in a voice channel!', ephemeral: true });
+        }
+
+        await interaction.deferReply(); // Public reply so everyone sees what's playing
+
+        try {
+            // Join Voice Channel
+            const connection = joinVoiceChannel({
+                channelId: voiceChannel.id,
+                guildId: interaction.guild.id,
+                adapterCreator: interaction.guild.voiceAdapterCreator,
+            });
+
+            // Get Queue for this guild
+            let queue = musicQueues.get(interaction.guild.id);
+            if (!queue) {
+                queue = {
+                    songs: [],
+                    player: createAudioPlayer({
+                        behaviors: {
+                            noSubscriber: NoSubscriberBehavior.Play
+                        }
+                    }),
+                    connection: connection,
+                    isPlaying: false
+                };
+                musicQueues.set(interaction.guild.id, queue);
+
+                // Handle Player Events
+                queue.player.on(AudioPlayerStatus.Idle, () => {
+                    queue.isPlaying = false;
+                    queue.songs.shift(); // Remove finished song
+                    if (queue.songs.length > 0) {
+                        playNextSong(interaction.guild.id);
+                    } else {
+                        // Queue empty
+                    }
+                });
+
+                queue.player.on('error', error => {
+                    console.error('Music Player Error:', error);
+                    queue.isPlaying = false;
+                    queue.songs.shift();
+                    if (queue.songs.length > 0) playNextSong(interaction.guild.id);
+                });
+
+                connection.subscribe(queue.player);
+            }
+
+            // Search for song
+            let video;
+            if (query.startsWith('http')) {
+                // Direct URL
+                if (play.yt_validate(query) === 'video') {
+                    const videoInfo = await play.video_info(query);
+                    video = videoInfo.video_details;
+                }
+            } else {
+                // Search
+                const results = await play.search(query, { limit: 1 });
+                if (results.length > 0) video = results[0];
+            }
+
+            if (!video) {
+                return interaction.editReply('❌ Could not find any video.');
+            }
+
+            // Add to queue
+            const song = {
+                title: video.title,
+                url: video.url,
+                duration: video.durationRaw,
+                thumbnail: video.thumbnails[0].url
+            };
+            
+            queue.songs.push(song);
+
+            if (!queue.isPlaying) {
+                playNextSong(interaction.guild.id);
+                await interaction.editReply(`🎶 **Now Playing:** [${song.title}](${song.url})`);
+            } else {
+                await interaction.editReply(`📝 **Added to Queue:** [${song.title}](${song.url})`);
+            }
+
+        } catch (error) {
+            console.error(error);
+            await interaction.editReply('❌ Error playing music.');
+        }
+    }
+
+    if (interaction.commandName === 'skip') {
+        const queue = musicQueues.get(interaction.guild.id);
+        if (!queue || queue.songs.length === 0) {
+            return interaction.reply({ content: '❌ Queue is empty.', ephemeral: true });
+        }
+        queue.player.stop(); // This triggers Idle event, which plays next song
+        await interaction.reply('⏩ Skipped!');
+    }
+
+    if (interaction.commandName === 'stop') {
+        const queue = musicQueues.get(interaction.guild.id);
+        if (queue) {
+            queue.songs = []; // Clear queue
+            queue.player.stop(); // Stop player
+            queue.connection.destroy(); // Leave channel
+            musicQueues.delete(interaction.guild.id);
+            await interaction.reply('TwT Stopped music and left.');
+        } else {
+            await interaction.reply({ content: '❌ I am not playing anything.', ephemeral: true });
+        }
+    }
+
+    if (interaction.commandName === 'queue') {
+        const queue = musicQueues.get(interaction.guild.id);
+        if (!queue || queue.songs.length === 0) {
+            return interaction.reply({ content: '❌ Queue is empty.', ephemeral: true });
+        }
+
+        const queueList = queue.songs.map((song, index) => {
+            return `${index === 0 ? '**Now Playing:**' : `**${index}.**`} [${song.title}](${song.url}) (${song.duration})`;
+        }).slice(0, 10).join('\n');
+
+        const embed = new EmbedBuilder()
+            .setColor('#FF0000')
+            .setTitle(`🎶 Music Queue (${queue.songs.length} songs)`)
+            .setDescription(queueList)
+            .setFooter({ text: queue.songs.length > 10 ? `...and ${queue.songs.length - 10} more` : 'End of queue' });
+
+        await interaction.reply({ embeds: [embed] });
+    }
+
     // --- VOICE FUN COMMANDS ---
     if (interaction.commandName === 'say') {
         const message = interaction.options.getString('message');
@@ -1157,30 +1319,55 @@ client.on('interactionCreate', async interaction => {
         await interaction.deferReply({ ephemeral: true });
 
         try {
+            console.log(`[VOICE] Attempting to join ${voiceChannel.name} (${voiceChannel.id})`);
             const connection = joinVoiceChannel({
                 channelId: voiceChannel.id,
                 guildId: interaction.guild.id,
                 adapterCreator: interaction.guild.voiceAdapterCreator,
             });
 
-            await entersState(connection, VoiceConnectionStatus.Ready, 30e3);
+            // Add error handling for connection
+            connection.on('error', (error) => {
+                console.error(`[VOICE] Connection Error: ${error.message}`);
+                // Try to destroy
+                try { connection.destroy(); } catch (e) {}
+            });
+
+            console.log(`[VOICE] Waiting for connection ready...`);
+            // Reduced timeout to 15s to fail faster
+            await entersState(connection, VoiceConnectionStatus.Ready, 15e3);
+            console.log(`[VOICE] Connected! Generating TTS...`);
 
             const stream = discordTTS.getVoiceStream(message);
-            const resource = createAudioResource(stream);
+            const resource = createAudioResource(stream, { inlineVolume: true });
+            resource.volume.setVolume(1.0);
+
             const player = createAudioPlayer();
+
+            // Handle player errors
+            player.on('error', error => {
+                console.error(`[VOICE] Player Error: ${error.message}`);
+            });
 
             player.play(resource);
             connection.subscribe(player);
 
             player.on(AudioPlayerStatus.Idle, () => {
+                console.log(`[VOICE] Playback finished, disconnecting.`);
                 connection.destroy();
             });
 
             await interaction.editReply({ content: `🗣️ Said: "${message}"` });
 
         } catch (error) {
-            console.error(error);
-            await interaction.editReply({ content: '❌ Failed to join or speak.' });
+            console.error(`[VOICE] Failed: ${error.message}`);
+            // Check if connection exists and destroy it
+            try { 
+                const connection = getVoiceConnection(interaction.guild.id);
+                if (connection) connection.destroy();
+            } catch (e) {}
+            
+            await interaction.editReply({ content: `❌ Failed to join or speak: ${error.message}` });
         }
     }
 
@@ -1195,7 +1382,8 @@ client.on('interactionCreate', async interaction => {
 
         await interaction.deferReply({ ephemeral: true });
 
-        // Map effect names to URLs or local paths (using online MP3s for simplicity/demo)
+        // Use more reliable URLs (GitHub raw or similar if possible, but myinstants is okay for now)
+        // Adding User-Agent or Referer logic is hard with simple string URL, but let's try.
         const sounds = {
             'vine-boom': 'https://www.myinstants.com/media/sounds/vine-boom.mp3',
             'bruh': 'https://www.myinstants.com/media/sounds/movie_1.mp3',
@@ -1212,29 +1400,48 @@ client.on('interactionCreate', async interaction => {
         }
 
         try {
+            console.log(`[VOICE] Attempting to join ${voiceChannel.name} for sound effect`);
             const connection = joinVoiceChannel({
                 channelId: voiceChannel.id,
                 guildId: interaction.guild.id,
                 adapterCreator: interaction.guild.voiceAdapterCreator,
             });
 
-            await entersState(connection, VoiceConnectionStatus.Ready, 30e3);
+            connection.on('error', (error) => {
+                console.error(`[VOICE] Connection Error: ${error.message}`);
+                try { connection.destroy(); } catch (e) {}
+            });
 
-            const resource = createAudioResource(soundUrl);
+            await entersState(connection, VoiceConnectionStatus.Ready, 15e3);
+            console.log(`[VOICE] Connected! Playing sound...`);
+
+            const resource = createAudioResource(soundUrl, { inlineVolume: true });
+            resource.volume.setVolume(1.0);
+            
             const player = createAudioPlayer();
+
+            player.on('error', error => {
+                console.error(`[VOICE] Player Error: ${error.message}`);
+            });
 
             player.play(resource);
             connection.subscribe(player);
 
             player.on(AudioPlayerStatus.Idle, () => {
+                console.log(`[VOICE] Sound finished, disconnecting.`);
                 connection.destroy();
             });
 
             await interaction.editReply({ content: `🔊 Playing: **${effect}**` });
 
         } catch (error) {
-            console.error(error);
-            await interaction.editReply({ content: '❌ Failed to play sound.' });
+            console.error(`[VOICE] Sound Failed: ${error.message}`);
+            try { 
+                const connection = getVoiceConnection(interaction.guild.id);
+                if (connection) connection.destroy();
+            } catch (e) {}
+
+            await interaction.editReply({ content: `❌ Failed to play sound: ${error.message}` });
         }
     }
 });
@@ -1273,6 +1480,32 @@ client.on('voiceStateUpdate', async (oldState, newState) => {
         console.log(`[DEBUG] User ${newState.id} is NOT in Auto-Kick list.`);
     }
 });
+
+// --- Helper: Play Next Song ---
+async function playNextSong(guildId) {
+    const queue = musicQueues.get(guildId);
+    if (!queue || queue.songs.length === 0) {
+        // queue.connection.destroy();
+        // musicQueues.delete(guildId);
+        return;
+    }
+
+    const song = queue.songs[0];
+    queue.isPlaying = true;
+
+    try {
+        const stream = await play.stream(song.url);
+        const resource = createAudioResource(stream.stream, {
+            inputType: stream.type
+        });
+
+        queue.player.play(resource);
+    } catch (error) {
+        console.error('Error playing song:', error);
+        queue.songs.shift();
+        playNextSong(guildId);
+    }
+}
 
 // --- Helper: Map v4 Match to v3 Structure ---
 function mapV4MatchToV3(v4Match) {
