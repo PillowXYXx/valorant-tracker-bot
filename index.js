@@ -43,6 +43,11 @@ const Groq = require('groq-sdk');
 const ffmpegPath = require('ffmpeg-static');
 const opus = require('opusscript'); // Explicitly import opusscript
 
+// --- FIX FOR RENDER/LINUX DEPLOYMENT ---
+// Explicitly set the FFmpeg path for discord.js / prism-media
+// This ensures it finds the binary even if not in PATH
+process.env.FFMPEG_PATH = ffmpegPath; 
+
 console.log(`[STARTUP] FFmpeg Path: ${ffmpegPath}`);
 console.log(`[STARTUP] Voice Dependencies Report:\n${generateDependencyReport()}`);
 
