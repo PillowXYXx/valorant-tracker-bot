@@ -1660,21 +1660,22 @@ client.on('voiceStateUpdate', async (oldState, newState) => {
     // If the bot itself is updated
     if (newState.id === client.user.id && newState.channelId) {
         // Check if deafened or muted
+        // Only run if the state is actually different and is TRUE (we want FALSE)
         if (newState.selfDeaf || newState.selfMute) {
              console.log(`[VOICE] Bot is deaf/muted! Attempting to fix...`);
              try {
-                 const connection = getVoiceConnection(newState.guild.id);
-                 if (connection) {
-                     // Rejoin with correct state
-                     joinVoiceChannel({
-                        channelId: newState.channelId,
-                        guildId: newState.guild.id,
-                        adapterCreator: newState.guild.voiceAdapterCreator,
-                        selfDeaf: false,
-                        selfMute: false
-                     });
-                     console.log(`[VOICE] Fixed bot voice state.`);
-                 }
+                 // Check if we are already in the middle of a connection attempt?
+                 // Simply re-joining with correct flags should be fine, but let's log it.
+                 console.log(`[VOICE] Re-joining to clear deaf/mute state.`);
+                 
+                 joinVoiceChannel({
+                    channelId: newState.channelId,
+                    guildId: newState.guild.id,
+                    adapterCreator: newState.guild.voiceAdapterCreator,
+                    selfDeaf: false,
+                    selfMute: false
+                 });
+                 console.log(`[VOICE] Fixed bot voice state.`);
              } catch (e) {
                  console.error(`[VOICE] Failed to fix voice state:`, e);
              }
@@ -1712,6 +1713,16 @@ client.on('messageCreate', async (message) => {
                         selfDeaf: false,
                         selfMute: false
                     });
+
+                    // Add connection state logging
+                    connection.on('stateChange', (oldState, newState) => {
+                        console.log(`[TTS DEBUG] Connection State: ${oldState.status} -> ${newState.status}`);
+                    });
+
+                    connection.on('error', error => {
+                        console.error('[TTS DEBUG] Connection Error:', error);
+                    });
+
                     console.log(`[TTS DEBUG] Join command sent.`);
                 } catch (e) {
                     console.error('[TTS DEBUG] Auto-Join Error:', e);
@@ -1723,22 +1734,41 @@ client.on('messageCreate', async (message) => {
             }
         } else {
              console.log(`[TTS DEBUG] Bot already connected to voice.`);
+             // Add connection state logging for existing connection
+             connection.removeAllListeners('stateChange');
+             connection.on('stateChange', (oldState, newState) => {
+                 console.log(`[TTS DEBUG] (Existing) Connection State: ${oldState.status} -> ${newState.status}`);
+             });
         }
 
         try {
-            // Ensure connection is ready before playing
+            // Wait for connection to be ready with a slightly shorter timeout but retry logic
             if (connection.state.status !== VoiceConnectionStatus.Ready) {
                  try {
-                     console.log(`[TTS DEBUG] Connection not ready (State: ${connection.state.status}), waiting...`);
-                     await entersState(connection, VoiceConnectionStatus.Ready, 20_000); // Increased to 20s
-                     console.log(`[TTS DEBUG] Connection ready.`);
+                     console.log(`[TTS DEBUG] Connection status: ${connection.state.status}. Waiting for Ready...`);
+                     await entersState(connection, VoiceConnectionStatus.Ready, 10_000); 
+                     console.log(`[TTS DEBUG] Connection is now Ready.`);
                  } catch (err) {
-                     console.error("[TTS DEBUG] Connection Timeout:", err);
-                     // Try to recover by re-joining?
-                     return;
+                     console.error("[TTS DEBUG] Connection failed to reach Ready within 10s. Forcing rejoin...");
+                     // If we timed out, destroy and try once more
+                     try { connection.destroy(); } catch(e) {}
+                     
+                     const member = message.member;
+                     if (!member || !member.voice.channel) return;
+
+                     connection = joinVoiceChannel({
+                        channelId: member.voice.channel.id,
+                        guildId: message.guild.id,
+                        adapterCreator: message.guild.voiceAdapterCreator,
+                        selfDeaf: false,
+                        selfMute: false
+                     });
+                     
+                     await entersState(connection, VoiceConnectionStatus.Ready, 10_000);
+                     console.log(`[TTS DEBUG] Connection Ready after retry.`);
                  }
             } else {
-                 console.log(`[TTS DEBUG] Connection is Ready.`);
+                 console.log(`[TTS DEBUG] Connection is already Ready.`);
             }
 
             // Using direct URL if getVoiceStream fails or produces silence
