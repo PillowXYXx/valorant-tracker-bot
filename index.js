@@ -1,5 +1,18 @@
 const http = require('http');
 require('dotenv').config();
+
+// --- CRITICAL ERROR HANDLING ---
+// Prevent the bot from crashing on unhandled errors
+process.on('uncaughtException', (error) => {
+    console.error('UNCAUGHT EXCEPTION:', error);
+    // Do not exit!
+});
+
+process.on('unhandledRejection', (reason, promise) => {
+    console.error('UNHANDLED REJECTION:', reason);
+    // Do not exit!
+});
+
 const {
     Client,
     GatewayIntentBits,
@@ -1806,13 +1819,20 @@ async function playNextSong(guildId) {
         
         console.log(`[MUSIC] Using InputType: ${inputType} (Forced FFmpeg)`);
 
-        const resource = createAudioResource(stream.stream, {
-            inputType: inputType,
-            inlineVolume: true 
-        });
-        resource.volume.setVolume(1.0);
+        try {
+            const resource = createAudioResource(stream.stream, {
+                inputType: inputType,
+                inlineVolume: true 
+            });
+            resource.volume.setVolume(1.0);
 
-        queue.player.play(resource);
+            queue.player.play(resource);
+        } catch (resError) {
+             console.error('[MUSIC CRITICAL] Failed to create resource or play:', resError);
+             queue.songs.shift();
+             playNextSong(guildId);
+             return;
+        }
         
         // Ensure subscription is active
         if (queue.connection) {
