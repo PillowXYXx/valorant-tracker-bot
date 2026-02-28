@@ -28,6 +28,12 @@ const {
 } = require('@discordjs/voice');
 const discordTTS = require('discord-tts');
 const play = require('play-dl');
+// Fix for play-dl auth
+play.setToken({
+    youtube: {
+        cookie: "" // If you have cookies, otherwise it tries to work without
+    }
+});
 const axios = require('axios');
 const fs = require('fs');
 const path = require('path');
@@ -81,6 +87,9 @@ const TROLL_IMAGE_DIR = path.join(__dirname, 'Photo');
 
 // Music Queue System
 const musicQueues = new Map(); // Guild ID -> { queue: [], player: AudioPlayer, connection: VoiceConnection, isPlaying: boolean }
+
+// TTS Channel Map
+const ttsChannels = new Map(); // Guild ID -> Channel ID
 
 // Troll Modes
 const TROLL_MODES = {
@@ -533,7 +542,10 @@ const commands = [
         .setDescription('Stop music and clear queue'),
     new SlashCommandBuilder()
         .setName('queue')
-        .setDescription('Show current music queue')
+        .setDescription('Show current music queue'),
+    new SlashCommandBuilder()
+        .setName('tts')
+        .setDescription('Toggle Text-to-Speech for this channel (Bot reads messages)'),
 ]
     .map(command => command.toJSON());
 
@@ -1186,6 +1198,8 @@ client.on('interactionCreate', async interaction => {
                 channelId: voiceChannel.id,
                 guildId: interaction.guild.id,
                 adapterCreator: interaction.guild.voiceAdapterCreator,
+                selfDeaf: false, // IMPORTANT: Ensure bot is not deafened
+                selfMute: false  // IMPORTANT: Ensure bot is not muted
             });
 
             // Get Queue for this guild
@@ -1226,16 +1240,21 @@ client.on('interactionCreate', async interaction => {
 
             // Search for song
             let video;
-            if (query.startsWith('http')) {
-                // Direct URL
-                if (play.yt_validate(query) === 'video') {
-                    const videoInfo = await play.video_info(query);
-                    video = videoInfo.video_details;
+            try {
+                if (query.startsWith('http')) {
+                    // Direct URL
+                    if (play.yt_validate(query) === 'video') {
+                        const videoInfo = await play.video_info(query);
+                        video = videoInfo.video_details;
+                    }
+                } else {
+                    // Search
+                    const results = await play.search(query, { limit: 1 });
+                    if (results.length > 0) video = results[0];
                 }
-            } else {
-                // Search
-                const results = await play.search(query, { limit: 1 });
-                if (results.length > 0) video = results[0];
+            } catch (searchError) {
+                console.error("Search Error:", searchError);
+                return interaction.editReply('❌ Failed to find/load video. Try a different search term or URL.');
             }
 
             if (!video) {
@@ -1250,6 +1269,12 @@ client.on('interactionCreate', async interaction => {
                 thumbnail: video.thumbnails[0].url
             };
             
+            // Check for duplicates in queue
+            const isDuplicate = queue.songs.some(s => s.url === song.url || s.title === song.title);
+            if (isDuplicate) {
+                 return interaction.editReply(`⚠️ **${song.title}** is already in the queue!`);
+            }
+
             queue.songs.push(song);
 
             if (!queue.isPlaying) {
@@ -1306,6 +1331,37 @@ client.on('interactionCreate', async interaction => {
         await interaction.reply({ embeds: [embed] });
     }
 
+    // --- TTS COMMAND ---
+    if (interaction.commandName === 'tts') {
+        const currentChannelId = ttsChannels.get(interaction.guild.id);
+        
+        if (currentChannelId === interaction.channel.id) {
+            // Disable
+            ttsChannels.delete(interaction.guild.id);
+            await interaction.reply('🔇 **TTS Disabled** for this channel.');
+        } else {
+            // Enable
+            ttsChannels.set(interaction.guild.id, interaction.channel.id);
+            await interaction.reply(`🗣️ **TTS Enabled**! I will read messages from <#${interaction.channel.id}> in the voice channel.`);
+            
+            // Auto-join if user is in voice
+            const member = interaction.member;
+            if (member.voice.channel) {
+                try {
+                    joinVoiceChannel({
+                        channelId: member.voice.channel.id,
+                        guildId: interaction.guild.id,
+                        adapterCreator: interaction.guild.voiceAdapterCreator,
+                        selfDeaf: false,
+                        selfMute: false
+                    });
+                } catch (e) {
+                    console.error('Auto-join TTS error:', e);
+                }
+            }
+        }
+    }
+
     // --- VOICE FUN COMMANDS ---
     if (interaction.commandName === 'say') {
         const message = interaction.options.getString('message');
@@ -1324,6 +1380,8 @@ client.on('interactionCreate', async interaction => {
                 channelId: voiceChannel.id,
                 guildId: interaction.guild.id,
                 adapterCreator: interaction.guild.voiceAdapterCreator,
+                selfDeaf: false,
+                selfMute: false
             });
 
             // Add error handling for connection
@@ -1405,6 +1463,8 @@ client.on('interactionCreate', async interaction => {
                 channelId: voiceChannel.id,
                 guildId: interaction.guild.id,
                 adapterCreator: interaction.guild.voiceAdapterCreator,
+                selfDeaf: false,
+                selfMute: false
             });
 
             connection.on('error', (error) => {
@@ -1479,14 +1539,98 @@ client.on('voiceStateUpdate', async (oldState, newState) => {
     } else {
         console.log(`[DEBUG] User ${newState.id} is NOT in Auto-Kick list.`);
     }
+
+    // --- FORCE UNMUTE / UNDEAFEN BOT ---
+    // If the bot itself is updated
+    if (newState.id === client.user.id && newState.channelId) {
+        // Check if deafened or muted
+        if (newState.selfDeaf || newState.selfMute) {
+             console.log(`[VOICE] Bot is deaf/muted! Attempting to fix...`);
+             try {
+                 const connection = getVoiceConnection(newState.guild.id);
+                 if (connection) {
+                     // Rejoin with correct state
+                     joinVoiceChannel({
+                        channelId: newState.channelId,
+                        guildId: newState.guild.id,
+                        adapterCreator: newState.guild.voiceAdapterCreator,
+                        selfDeaf: false,
+                        selfMute: false
+                     });
+                     console.log(`[VOICE] Fixed bot voice state.`);
+                 }
+             } catch (e) {
+                 console.error(`[VOICE] Failed to fix voice state:`, e);
+             }
+        }
+    }
+});
+
+// --- TTS MESSAGE LISTENER ---
+client.on('messageCreate', async (message) => {
+    if (message.author.bot || !message.guild || !message.content) return;
+
+    const ttsChannelId = ttsChannels.get(message.guild.id);
+    if (ttsChannelId === message.channel.id) {
+        // Check if bot is in voice
+        let connection = getVoiceConnection(message.guild.id);
+        
+        // If not connected, try to join the user's voice channel
+        if (!connection) {
+            const member = message.member;
+            if (member && member.voice.channel) {
+                try {
+                    connection = joinVoiceChannel({
+                        channelId: member.voice.channel.id,
+                        guildId: message.guild.id,
+                        adapterCreator: message.guild.voiceAdapterCreator,
+                        selfDeaf: false,
+                        selfMute: false
+                    });
+                } catch (e) {
+                    console.error('TTS Auto-Join Error:', e);
+                    return;
+                }
+            } else {
+                return; // User not in voice, bot not in voice
+            }
+        }
+
+        try {
+            const stream = discordTTS.getVoiceStream(message.content);
+            const resource = createAudioResource(stream, { inlineVolume: true });
+            resource.volume.setVolume(1.0);
+            
+            const ttsPlayer = createAudioPlayer();
+            ttsPlayer.play(resource);
+            
+            // If music is playing, temporarily switch subscription
+            const musicQueue = musicQueues.get(message.guild.id);
+            
+            connection.subscribe(ttsPlayer);
+            
+            ttsPlayer.on(AudioPlayerStatus.Idle, () => {
+                // If music was playing (or is queued), switch back
+                if (musicQueue) {
+                    connection.subscribe(musicQueue.player);
+                }
+            });
+            
+            ttsPlayer.on('error', error => {
+                console.error('TTS Player Error:', error);
+                if (musicQueue) connection.subscribe(musicQueue.player);
+            });
+
+        } catch (e) {
+            console.error('TTS Error:', e);
+        }
+    }
 });
 
 // --- Helper: Play Next Song ---
 async function playNextSong(guildId) {
     const queue = musicQueues.get(guildId);
     if (!queue || queue.songs.length === 0) {
-        // queue.connection.destroy();
-        // musicQueues.delete(guildId);
         return;
     }
 
@@ -1494,7 +1638,10 @@ async function playNextSong(guildId) {
     queue.isPlaying = true;
 
     try {
-        const stream = await play.stream(song.url);
+        const stream = await play.stream(song.url, {
+            discordPlayerCompatibility: true // Helps with playback issues
+        });
+        
         const resource = createAudioResource(stream.stream, {
             inputType: stream.type
         });
@@ -1502,7 +1649,7 @@ async function playNextSong(guildId) {
         queue.player.play(resource);
     } catch (error) {
         console.error('Error playing song:', error);
-        queue.songs.shift();
+        queue.songs.shift(); // Skip broken song
         playNextSong(guildId);
     }
 }
