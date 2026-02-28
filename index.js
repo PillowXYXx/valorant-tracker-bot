@@ -41,6 +41,7 @@ const fs = require('fs');
 const path = require('path');
 const Groq = require('groq-sdk');
 const ffmpegPath = require('ffmpeg-static');
+const opus = require('opusscript'); // Explicitly import opusscript
 
 console.log(`[STARTUP] FFmpeg Path: ${ffmpegPath}`);
 console.log(`[STARTUP] Voice Dependencies Report:\n${generateDependencyReport()}`);
@@ -72,7 +73,8 @@ const client = new Client({
         GatewayIntentBits.Guilds,
         GatewayIntentBits.GuildMessages,
         GatewayIntentBits.MessageContent,
-        GatewayIntentBits.GuildVoiceStates
+        GatewayIntentBits.GuildVoiceStates,
+        GatewayIntentBits.GuildMessageReactions
     ]
 });
 
@@ -1437,7 +1439,12 @@ client.on('interactionCreate', async interaction => {
             });
 
             player.play(resource);
-            connection.subscribe(player);
+            const subscription = connection.subscribe(player);
+            if (!subscription) {
+                console.error('[VOICE] Failed to subscribe player');
+            } else {
+                console.log('[VOICE] Subscribed player successfully');
+            }
 
             player.on(AudioPlayerStatus.Idle, () => {
                 console.log(`[VOICE] Playback finished, disconnecting.`);
@@ -1629,7 +1636,9 @@ client.on('messageCreate', async (message) => {
             // Ensure connection is ready before playing
             if (connection.state.status !== VoiceConnectionStatus.Ready) {
                  try {
+                     console.log(`[TTS] Connection not ready, waiting...`);
                      await entersState(connection, VoiceConnectionStatus.Ready, 5000);
+                     console.log(`[TTS] Connection ready.`);
                  } catch (err) {
                      console.error("TTS Connection Timeout:", err);
                      return;
@@ -1677,6 +1686,11 @@ client.on('messageCreate', async (message) => {
             }
             
             const subscription = connection.subscribe(ttsPlayer);
+            if (!subscription) {
+                console.error('[TTS] Failed to subscribe to player');
+            } else {
+                console.log('[TTS] Subscribed to player');
+            }
             
             if (subscription) {
                 // setTimeout(() => subscription.unsubscribe(), 15_000); // Safety timeout?
@@ -1712,16 +1726,39 @@ async function playNextSong(guildId) {
         
         console.log(`[MUSIC] Playing ${song.title} - Stream Type: ${stream.type}`);
 
+        // Handle specific stream types for play-dl
+        let inputType = StreamType.Arbitrary;
+        
+        // play-dl stream types can be 'webm/opus', 'ogg/opus', or others
+        // StreamType.WebmOpus requires the input to be exactly WebM/Opus
+        // StreamType.OggOpus requires Ogg/Opus
+        // StreamType.Arbitrary lets Discord.js handle ffmpeg transcoding if needed
+        
+        if (stream.type === 'webm/opus') {
+            inputType = StreamType.WebmOpus;
+        } else if (stream.type === 'ogg/opus') {
+            inputType = StreamType.OggOpus;
+        }
+        
+        console.log(`[MUSIC] Using InputType: ${inputType}`);
+
         const resource = createAudioResource(stream.stream, {
-            inputType: stream.type,
-            inlineVolume: true // Optional: allows volume control
+            inputType: inputType,
+            inlineVolume: true 
         });
         resource.volume.setVolume(1.0);
 
         queue.player.play(resource);
+        
         // Ensure subscription is active
         if (queue.connection) {
-            queue.connection.subscribe(queue.player);
+            const subscription = queue.connection.subscribe(queue.player);
+            if (subscription) {
+                 console.log(`[MUSIC] Player subscribed successfully.`);
+                 // Prevent auto-unsubscribe after a while? No, let it play.
+            } else {
+                 console.error(`[MUSIC] Failed to subscribe player!`);
+            }
         }
     } catch (error) {
         console.error('Error playing song:', error);
