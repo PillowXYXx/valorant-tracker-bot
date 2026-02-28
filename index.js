@@ -24,9 +24,11 @@ const {
     entersState,
     generateDependencyReport,
     getVoiceConnection,
-    NoSubscriberBehavior
+    NoSubscriberBehavior,
+    StreamType
 } = require('@discordjs/voice');
-const discordTTS = require('discord-tts');
+const discordTTS = require('discord-tts'); // Keep for backup? Or remove?
+const googleTTS = require('google-tts-api'); // NEW: For better TTS
 const play = require('play-dl');
 // Fix for play-dl auth
 play.setToken({
@@ -38,6 +40,10 @@ const axios = require('axios');
 const fs = require('fs');
 const path = require('path');
 const Groq = require('groq-sdk');
+const ffmpegPath = require('ffmpeg-static');
+
+console.log(`[STARTUP] FFmpeg Path: ${ffmpegPath}`);
+console.log(`[STARTUP] Voice Dependencies Report:\n${generateDependencyReport()}`);
 
 const USERS_FILE = path.join(__dirname, 'users.json');
 
@@ -1241,16 +1247,25 @@ client.on('interactionCreate', async interaction => {
             // Search for song
             let video;
             try {
-                if (query.startsWith('http')) {
+                if (play.yt_validate(query) === 'video') {
                     // Direct URL
-                    if (play.yt_validate(query) === 'video') {
-                        const videoInfo = await play.video_info(query);
-                        video = videoInfo.video_details;
-                    }
+                    const videoInfo = await play.video_info(query);
+                    video = videoInfo.video_details;
                 } else {
                     // Search
-                    const results = await play.search(query, { limit: 1 });
-                    if (results.length > 0) video = results[0];
+                    // Ensure we search for videos only to avoid random playlists/channels
+                    console.log(`[MUSIC] Searching for: ${query}`);
+                    const results = await play.search(query, { 
+                        limit: 1,
+                        source: { youtube: "video" }
+                    });
+                    
+                    if (results.length > 0) {
+                        video = results[0];
+                        console.log(`[MUSIC] Found: ${video.title} (${video.url})`);
+                    } else {
+                        console.log(`[MUSIC] No results found for: ${query}`);
+                    }
                 }
             } catch (searchError) {
                 console.error("Search Error:", searchError);
@@ -1396,11 +1411,25 @@ client.on('interactionCreate', async interaction => {
             await entersState(connection, VoiceConnectionStatus.Ready, 15e3);
             console.log(`[VOICE] Connected! Generating TTS...`);
 
-            const stream = discordTTS.getVoiceStream(message);
-            const resource = createAudioResource(stream, { inlineVolume: true });
+            // Use Google TTS API for reliable English voice
+            const url = googleTTS.getAudioUrl(message, {
+                lang: 'en',
+                slow: false,
+                host: 'https://translate.google.com',
+            });
+            console.log(`[VOICE] Generated TTS URL for: "${message}"`);
+
+            const resource = createAudioResource(url, { 
+                inputType: StreamType.Arbitrary,
+                inlineVolume: true 
+            });
             resource.volume.setVolume(1.0);
 
             const player = createAudioPlayer();
+            
+            player.on('stateChange', (oldState, newState) => {
+                console.log(`[SAY] Player State: ${oldState.status} -> ${newState.status}`);
+            });
 
             // Handle player errors
             player.on('error', error => {
@@ -1597,28 +1626,67 @@ client.on('messageCreate', async (message) => {
         }
 
         try {
-            const stream = discordTTS.getVoiceStream(message.content);
-            const resource = createAudioResource(stream, { inlineVolume: true });
+            // Ensure connection is ready before playing
+            if (connection.state.status !== VoiceConnectionStatus.Ready) {
+                 try {
+                     await entersState(connection, VoiceConnectionStatus.Ready, 5000);
+                 } catch (err) {
+                     console.error("TTS Connection Timeout:", err);
+                     return;
+                 }
+            }
+
+            // Using direct URL if getVoiceStream fails or produces silence
+            // discord-tts stream sometimes fails with createAudioResource
+            // Let's try to get the URL from discord-tts (it uses google-tts-api underneath)
+            // Since we can't easily access the URL from discord-tts package, let's use the stream but with specific flags
+            
+            // Use Google TTS API for reliable English voice
+            const url = googleTTS.getAudioUrl(message.content, {
+                lang: 'en',
+                slow: false,
+                host: 'https://translate.google.com',
+            });
+            console.log(`[TTS] Generated URL for: "${message.content.substring(0, 20)}..."`);
+
+            const resource = createAudioResource(url, { 
+                inputType: StreamType.Arbitrary, 
+                inlineVolume: true 
+            });
             resource.volume.setVolume(1.0);
             
             const ttsPlayer = createAudioPlayer();
+            
+            ttsPlayer.on('stateChange', (oldState, newState) => {
+                console.log(`[TTS] Player State: ${oldState.status} -> ${newState.status}`);
+            });
+
+            ttsPlayer.on('error', error => {
+                console.error('TTS Player Error:', error);
+                const musicQueue = musicQueues.get(message.guild.id);
+                if (musicQueue) connection.subscribe(musicQueue.player);
+            });
+
             ttsPlayer.play(resource);
             
             // If music is playing, temporarily switch subscription
             const musicQueue = musicQueues.get(message.guild.id);
+            if (musicQueue && musicQueue.isPlaying) {
+                 // Pause music? Or just unsubscribe?
+                 // Usually just unsubscribing is enough, the player keeps playing in background
+            }
             
-            connection.subscribe(ttsPlayer);
+            const subscription = connection.subscribe(ttsPlayer);
             
+            if (subscription) {
+                // setTimeout(() => subscription.unsubscribe(), 15_000); // Safety timeout?
+            }
+
             ttsPlayer.on(AudioPlayerStatus.Idle, () => {
                 // If music was playing (or is queued), switch back
                 if (musicQueue) {
                     connection.subscribe(musicQueue.player);
                 }
-            });
-            
-            ttsPlayer.on('error', error => {
-                console.error('TTS Player Error:', error);
-                if (musicQueue) connection.subscribe(musicQueue.player);
             });
 
         } catch (e) {
@@ -1642,11 +1710,19 @@ async function playNextSong(guildId) {
             discordPlayerCompatibility: true // Helps with playback issues
         });
         
+        console.log(`[MUSIC] Playing ${song.title} - Stream Type: ${stream.type}`);
+
         const resource = createAudioResource(stream.stream, {
-            inputType: stream.type
+            inputType: stream.type,
+            inlineVolume: true // Optional: allows volume control
         });
+        resource.volume.setVolume(1.0);
 
         queue.player.play(resource);
+        // Ensure subscription is active
+        if (queue.connection) {
+            queue.connection.subscribe(queue.player);
+        }
     } catch (error) {
         console.error('Error playing song:', error);
         queue.songs.shift(); // Skip broken song
