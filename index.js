@@ -1723,6 +1723,10 @@ client.on('messageCreate', async (message) => {
                         console.error('[TTS DEBUG] Connection Error:', error);
                     });
 
+                    connection.on('debug', message => {
+                        console.log(`[VOICE INTERNAL] ${message}`);
+                    });
+
                     console.log(`[TTS DEBUG] Join command sent.`);
                 } catch (e) {
                     console.error('[TTS DEBUG] Auto-Join Error:', e);
@@ -1739,6 +1743,10 @@ client.on('messageCreate', async (message) => {
              connection.on('stateChange', (oldState, newState) => {
                  console.log(`[TTS DEBUG] (Existing) Connection State: ${oldState.status} -> ${newState.status}`);
              });
+             // Add debug listener if not present (difficult to check, but re-adding is safe-ish or just skip)
+             connection.on('debug', message => {
+                console.log(`[VOICE INTERNAL] ${message}`);
+            });
         }
 
         try {
@@ -1746,10 +1754,10 @@ client.on('messageCreate', async (message) => {
             if (connection.state.status !== VoiceConnectionStatus.Ready) {
                  try {
                      console.log(`[TTS DEBUG] Connection status: ${connection.state.status}. Waiting for Ready...`);
-                     await entersState(connection, VoiceConnectionStatus.Ready, 10_000); 
+                     await entersState(connection, VoiceConnectionStatus.Ready, 20_000); 
                      console.log(`[TTS DEBUG] Connection is now Ready.`);
                  } catch (err) {
-                     console.error("[TTS DEBUG] Connection failed to reach Ready within 10s. Forcing rejoin...");
+                     console.error("[TTS DEBUG] Connection failed to reach Ready within 20s. Forcing rejoin...");
                      // If we timed out, destroy and try once more
                      try { connection.destroy(); } catch(e) {}
                      
@@ -1763,9 +1771,18 @@ client.on('messageCreate', async (message) => {
                         selfDeaf: false,
                         selfMute: false
                      });
+
+                     connection.on('debug', message => {
+                        console.log(`[VOICE INTERNAL RETRY] ${message}`);
+                    });
                      
-                     await entersState(connection, VoiceConnectionStatus.Ready, 10_000);
-                     console.log(`[TTS DEBUG] Connection Ready after retry.`);
+                     try {
+                        await entersState(connection, VoiceConnectionStatus.Ready, 20_000);
+                        console.log(`[TTS DEBUG] Connection Ready after retry.`);
+                     } catch (retryErr) {
+                        console.error("[TTS DEBUG] Retry connection timed out. Attempting to play anyway (Soft Fail).");
+                        // We do NOT return here. We let the code proceed to play()
+                     }
                  }
             } else {
                  console.log(`[TTS DEBUG] Connection is already Ready.`);
