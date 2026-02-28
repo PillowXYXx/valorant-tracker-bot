@@ -1484,6 +1484,7 @@ client.on('interactionCreate', async interaction => {
             });
 
             const resource = createAudioResource(response.data, { 
+                inputType: StreamType.Arbitrary,
                 inlineVolume: true 
             });
             resource.volume.setVolume(1.0);
@@ -1711,10 +1712,11 @@ client.on('messageCreate', async (message) => {
             if (connection.state.status !== VoiceConnectionStatus.Ready) {
                  try {
                      console.log(`[TTS DEBUG] Connection not ready (State: ${connection.state.status}), waiting...`);
-                     await entersState(connection, VoiceConnectionStatus.Ready, 5000);
+                     await entersState(connection, VoiceConnectionStatus.Ready, 20_000); // Increased to 20s
                      console.log(`[TTS DEBUG] Connection ready.`);
                  } catch (err) {
                      console.error("[TTS DEBUG] Connection Timeout:", err);
+                     // Try to recover by re-joining?
                      return;
                  }
             } else {
@@ -1744,6 +1746,7 @@ client.on('messageCreate', async (message) => {
             console.log(`[TTS DEBUG] Stream fetched. Status: ${response.status}`);
 
             const resource = createAudioResource(response.data, { 
+                inputType: StreamType.Arbitrary,
                 inlineVolume: true 
             });
             resource.volume.setVolume(1.0);
