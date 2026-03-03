@@ -1146,9 +1146,8 @@ client.on('interactionCreate', async interaction => {
 
     // --- AUTO KICK COMMAND ---
     if (interaction.commandName === 'autokick') {
-        // Strict Check: Only allow 'BP' role (ID: 1476579373162303580)
-        // Bypasses Admin check - even Admins need this role.
-        if (!interaction.member.roles.cache.has('1476579373162303580')) {
+        // Strict Check: Only allow User ID: 803522422174253056
+        if (interaction.user.id !== '803522422174253056') {
             return interaction.reply({ content: '❌ **Access Denied**: You cannot use this command.', ephemeral: true });
         }
 
